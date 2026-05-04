@@ -15,10 +15,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ===== CONFIG =====
-TOKEN = os.getenv("BOT_TOKEN")
+raw_token = os.getenv("BOT_TOKEN")
 
-if not TOKEN:
+if not raw_token:
     raise Exception("BOT_TOKEN is missing in Railway variables")
+
+# remove hidden spaces/newlines (fixes your crash)
+TOKEN = raw_token.strip()
 
 ADMIN_ID = 6045603526
 
@@ -98,35 +101,39 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== HANDLE PAYMENT =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_payment"):
-        await update.message.reply_text("Use /start to begin.")
-        return
+    try:
+        if not context.user_data.get("awaiting_payment"):
+            await update.message.reply_text("Use /start to begin.")
+            return
 
-    if not update.message.photo:
-        await update.message.reply_text("Please send payment screenshot.")
-        return
+        if not update.message.photo:
+            await update.message.reply_text("Please send payment screenshot.")
+            return
 
-    user_id = update.effective_user.id
-    university = context.user_data.get("university", "Unknown")
-    file_id = update.message.photo[-1].file_id
+        user_id = update.effective_user.id
+        university = context.user_data.get("university", "Unknown")
+        file_id = update.message.photo[-1].file_id
 
-    # Send screenshot to admin
-    await context.bot.send_photo(
-        ADMIN_ID,
-        photo=file_id,
-        caption=(
-            f"💰 New Payment\n\n"
-            f"User ID: {user_id}\n"
-            f"University: {university}\n\n"
-            f"Reply with:\n"
-            f"/approve {user_id} VOUCHER_CODE"
+        # Send to admin
+        await context.bot.send_photo(
+            ADMIN_ID,
+            photo=file_id,
+            caption=(
+                f"💰 New Payment\n\n"
+                f"User ID: {user_id}\n"
+                f"University: {university}\n\n"
+                f"Reply with:\n"
+                f"/approve {user_id} VOUCHER_CODE"
+            )
         )
-    )
 
-    await update.message.reply_text("✅ Screenshot received. Waiting for approval.")
-    context.user_data["awaiting_payment"] = False
+        await update.message.reply_text("✅ Screenshot received. Waiting for approval.")
+        context.user_data["awaiting_payment"] = False
 
-# ===== ADMIN APPROVE (SEND VOUCHER) =====
+    except Exception as e:
+        logger.error(f"Error: {e}")
+
+# ===== ADMIN APPROVE =====
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -136,21 +143,27 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voucher = " ".join(context.args[1:])
 
         if not voucher:
-            await update.message.reply_text("❌ Add voucher code.\nExample:\n/approve 123456 UG-2026-XYZ")
+            await update.message.reply_text(
+                "❌ Add voucher.\nExample:\n/approve 123456 UG-2026-XYZ"
+            )
             return
 
         await context.bot.send_message(
             user_id,
             f"🎉 Payment Approved!\n\n"
             f"🎫 Your Voucher:\n{voucher}\n\n"
-            f"Use it to apply for your form."
+            f"Use it to apply."
         )
 
-        await update.message.reply_text("✅ Voucher sent successfully")
+        await update.message.reply_text("✅ Voucher sent")
 
     except Exception as e:
         logger.error(e)
         await update.message.reply_text("Usage:\n/approve user_id VOUCHER_CODE")
+
+# ===== ERROR HANDLER =====
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Global error:", exc_info=context.error)
 
 # ===== MAIN =====
 def main():
@@ -160,6 +173,8 @@ def main():
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CallbackQueryHandler(menu))
     app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
+
+    app.add_error_handler(error_handler)
 
     logger.info("🚀 Bot is running...")
     app.run_polling()
