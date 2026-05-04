@@ -1,58 +1,53 @@
+import telebot
 import os
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ─── LOGGING ─────────────────────────────
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+print("BOT STARTING...")
 
-# ─── ENV ────────────────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
+TOKEN = os.getenv("BOT_TOKEN")
 
-# ─── SAFETY CHECK (THIS PREVENTS CRASH) ─
-if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN missing in Railway variables")
+if not TOKEN:
+    raise Exception("BOT_TOKEN missing")
 
-# ─── START ──────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Bot is LIVE\n\n"
-        "Commands working:\n"
-        "/buy\n"
-        "/balance\n"
-        "/referral"
+bot = telebot.TeleBot(TOKEN)
+
+ADMIN_ID = 6045603526
+
+# ─── START ───
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(
+        message.chat.id,
+        "Welcome to UniformsGH Bot 🎓\n\n"
+        "Use /buy to see prices\n"
+        "Use /referral to get your link"
     )
 
-# ─── SIMPLE TEST COMMANDS ───────────────
-async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🛒 Shop Menu\n\n"
-        "Forms:\n- ₵295 Public\n- ₵250 Technical\n\n"
-        "Send /paid after payment"
+# ─── BUY ───
+@bot.message_handler(commands=['buy'])
+def buy(message):
+    bot.send_message(
+        message.chat.id,
+        "University Forms:\n"
+        "• Public Universities: GH¢295\n"
+        "• Technical Universities: GH¢250\n\n"
+        "Pay via MoMo: 0530790707"
     )
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💰 Balance system coming soon")
+# ─── REFERRAL ───
+@bot.message_handler(commands=['referral'])
+def referral(message):
+    user_id = message.chat.id
+    link = f"https://t.me/uniformsgh_bot?start={user_id}"
 
-async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔗 Referral system active\n\n"
-        f"Your ID: {update.effective_user.id}"
+    bot.send_message(
+        user_id,
+        f"Your referral link:\n{link}\n\nEarn GH¢25 per referral!"
     )
 
-# ─── MAIN ───────────────────────────────
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+# ─── BALANCE (simple placeholder) ───
+@bot.message_handler(commands=['balance'])
+def balance(message):
+    bot.send_message(message.chat.id, "Balance system coming soon.")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("buy", buy))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("referral", referral))
-
-    logger.info("Bot started successfully")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+print("BOT RUNNING...")
+bot.infinity_polling()
