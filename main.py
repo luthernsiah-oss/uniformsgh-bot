@@ -1,120 +1,212 @@
-import telebot
-import sqlite3
 import os
+import logging
+import psycopg2
+from psycopg2 import pool
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
-ADMIN_ID = 6045603526
+# ─── LOGGING ─────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("BOT_TOKEN")
-bot = telebot.TeleBot(TOKEN)
+# ─── ENV ────────────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-conn = sqlite3.connect("users.db", check_same_thread=False)
-cursor = conn.cursor()
+AFFILIATE_COMMISSION = 25
+FORM_PRICE_PUBLIC = 295
+FORM_PRICE_TECH = 250
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    referrer INTEGER,
-    balance INTEGER DEFAULT 0
-)
-""")
-conn.commit()
+# ─── DB ─────────────────────────────────
+db_pool = pool.ThreadedConnectionPool(1, 10, DATABASE_URL)
 
+def conn():
+    return db_pool.getconn()
 
-# START
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.chat.id
+def release(c):
+    db_pool.putconn(c)
 
-    args = message.text.split()
-    referrer = None
+def init_db():
+    c = conn()
+    cur = c.cursor()
 
-    if len(args) > 1:
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id BIGINT PRIMARY KEY,
+        referrer BIGINT,
+        balance NUMERIC DEFAULT 0
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        type TEXT,
+        status TEXT DEFAULT 'pending'
+    )
+    """)
+
+    c.commit()
+    cur.close()
+    release(c)
+
+def register(user_id, ref=None):
+    c = conn()
+    cur = c.cursor()
+    cur.execute("""
+        INSERT INTO users (user_id, referrer)
+        VALUES (%s,%s)
+        ON CONFLICT (user_id) DO NOTHING
+    """, (user_id, ref))
+    c.commit()
+    cur.close()
+    release(c)
+
+def add_balance(user_id, amount):
+    c = conn()
+    cur = c.cursor()
+    cur.execute("UPDATE users SET balance = balance + %s WHERE user_id=%s", (amount, user_id))
+    c.commit()
+    cur.close()
+    release(c)
+
+def get_balance(user_id):
+    c = conn()
+    cur = c.cursor()
+    cur.execute("SELECT balance FROM users WHERE user_id=%s", (user_id,))
+    r = cur.fetchone()
+    cur.close()
+    release(c)
+    return r[0] if r else 0
+
+def get_ref(user_id):
+    c = conn()
+    cur = c.cursor()
+    cur.execute("SELECT referrer FROM users WHERE user_id=%s", (user_id,))
+    r = cur.fetchone()
+    cur.close()
+    release(c)
+    return r[0] if r else None
+
+# ─── START ──────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    ref = None
+    if context.args:
         try:
-            referrer = int(args[1])
+            ref = int(context.args[0])
         except:
-            referrer = None
+            ref = None
 
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = cursor.fetchone()
+    register(user.id, ref)
 
-    if not user:
-        cursor.execute("INSERT INTO users (user_id, referrer) VALUES (?, ?)", (user_id, referrer))
-        conn.commit()
-
-    bot.send_message(user_id,
-        "Welcome to UniformsGH Bot 🎓\n\nUse /referral to earn ₵25 per sale.")
-
-
-# REFERRAL
-@bot.message_handler(commands=['referral'])
-def referral(message):
-    user_id = message.chat.id
-    link = f"https://t.me/uniformsgh_bot?start={user_id}"
-
-    bot.send_message(user_id, f"Your referral link:\n{link}")
-
-
-# BUY
-@bot.message_handler(commands=['buy'])
-def buy(message):
-    user_id = message.chat.id
-
-    bot.send_message(user_id,
-        "University forms: ₵295\nTechnical Universities: ₵250\n\nPay via MoMo: 0530790707")
-
-    cursor.execute("SELECT referrer FROM users WHERE user_id=?", (user_id,))
-    ref = cursor.fetchone()
-
-    if ref and ref[0]:
-        cursor.execute("UPDATE users SET balance = balance + 25 WHERE user_id=?", (ref[0],))
-        conn.commit()
-
-
-# PAID
-@bot.message_handler(commands=['paid'])
-def paid(message):
-    user_id = message.chat.id
-
-    bot.send_message(user_id,
-        "Payment received 👍\nWaiting for admin approval.")
-
-    bot.send_message(
-        ADMIN_ID,
-        f"💰 Payment request from user: {user_id}\nApprove with /approve {user_id}"
+    await update.message.reply_text(
+        "🎓 Welcome to UniformsGH Bot\n\n"
+        "Buy:\n"
+        "- University Forms\n"
+        "- Technical Forms\n"
+        "- Checkers\n\n"
+        "Commands:\n"
+        "/buy - start order\n"
+        "/balance - earnings\n"
+        "/referral - link"
     )
 
+# ─── REFERRAL ───────────────────────────
+async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = f"https://t.me/YOUR_BOT_USERNAME?start={update.effective_user.id}"
+    await update.message.reply_text(f"Your referral link:\n{link}")
 
-# APPROVE
-@bot.message_handler(commands=['approve'])
-def approve(message):
-    if message.chat.id != ADMIN_ID:
+# ─── BUY MENU ───────────────────────────
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🏛 Public Forms ₵295", callback_data="pub")],
+        [InlineKeyboardButton("🔧 Technical Forms ₵250", callback_data="tech")],
+        [InlineKeyboardButton("📄 Checker ₵18.50", callback_data="checker")]
+    ]
+
+    await update.message.reply_text(
+        "Select product:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ─── CALLBACKS ──────────────────────────
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    user = q.from_user
+
+    if q.data == "pub":
+        price = FORM_PRICE_PUBLIC
+        order_type = "public"
+    elif q.data == "tech":
+        price = FORM_PRICE_TECH
+        order_type = "tech"
+    else:
+        price = 18.5
+        order_type = "checker"
+
+    await q.edit_message_text(
+        f"Order: {order_type}\nPrice: ₵{price}\n\n"
+        "After payment send /paid"
+    )
+
+    ref = get_ref(user.id)
+    if ref:
+        add_balance(ref, AFFILIATE_COMMISSION)
+
+# ─── PAID ───────────────────────────────
+async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    await update.message.reply_text("Payment received 👍 waiting approval")
+
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"New payment from {user.id}\nApprove: /approve {user.id}"
+    )
+
+# ─── APPROVE ────────────────────────────
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
 
     try:
-        user_id = int(message.text.split()[1])
+        uid = int(context.args[0])
+        add_balance(uid, AFFILIATE_COMMISSION)
 
-        cursor.execute("UPDATE users SET balance = balance + 25 WHERE user_id=?", (user_id,))
-        conn.commit()
-
-        bot.send_message(user_id, "🎉 Approved! ₵25 added to your balance.")
-        bot.send_message(ADMIN_ID, "✔ Approved")
+        await update.message.reply_text("Approved ✔")
+        await context.bot.send_message(uid, "🎉 Approved!")
 
     except:
-        bot.send_message(ADMIN_ID, "Usage: /approve user_id")
+        await update.message.reply_text("Usage: /approve user_id")
 
+# ─── BALANCE ────────────────────────────
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bal = get_balance(update.effective_user.id)
+    await update.message.reply_text(f"💰 Balance: ₵{bal}")
 
-# BALANCE
-@bot.message_handler(commands=['balance'])
-def balance(message):
-    user_id = message.chat.id
+# ─── MAIN ───────────────────────────────
+def main():
+    init_db()
 
-    cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
-    bal = cursor.fetchone()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    if bal:
-        bot.send_message(user_id, f"Your earnings: ₵{bal[0]}")
-    else:
-        bot.send_message(user_id, "No earnings yet.")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(CommandHandler("paid", paid))
+    app.add_handler(CommandHandler("approve", approve))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("referral", referral))
 
+    app.add_handler(CallbackQueryHandler(callback))
 
-bot.infinity_polling()
+    print("Bot running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
