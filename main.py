@@ -1,168 +1,152 @@
-import telebot
 import os
-import sqlite3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
+# ===== CONFIG =====
 TOKEN = os.getenv("BOT_TOKEN")
-bot = telebot.TeleBot(TOKEN)
-
 ADMIN_ID = 6045603526
 
-# DATABASE
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
+MOMO_NUMBER = "0530790707"
+ACCOUNT_NAME = "Frank Nsiah"
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    referrer INTEGER,
-    balance INTEGER DEFAULT 0
-)
-""")
+# ===== UNIVERSITIES =====
+PUBLIC_UNIS = [
+    "University of Ghana (UG)",
+    "KNUST",
+    "UCC",
+    "UEW",
+    "UDS",
+    "UMaT",
+    "UHAS",
+    "UENR"
+]
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    referrer INTEGER,
-    status TEXT
-)
-""")
+TECH_UNIS = [
+    "Accra Technical University",
+    "Kumasi Technical University",
+    "Takoradi Technical University",
+    "Cape Coast Technical University",
+    "Ho Technical University"
+]
 
-conn.commit()
+# ===== START =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎓 Public Universities (₵295)", callback_data="public")],
+        [InlineKeyboardButton("🔧 Technical Universities (₵250)", callback_data="technical")]
+    ]
 
-# START
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.chat.id
-    args = message.text.split()
-
-    referrer = None
-    if len(args) > 1:
-        try:
-            referrer = int(args[1])
-        except:
-            pass
-
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = cursor.fetchone()
-
-    if not user:
-        cursor.execute("INSERT INTO users (user_id, referrer) VALUES (?, ?)", (user_id, referrer))
-        conn.commit()
-
-    bot.send_message(user_id,
-        "🎓 *Welcome to UniformsGH*\n\n"
-        "Select a university type:\n\n"
-        "1️⃣ Public Universities – ₵295\n"
-        "2️⃣ Technical Universities – ₵250\n\n"
-        "Send *1* or *2* to continue",
-        parse_mode="Markdown"
+    await update.message.reply_text(
+        "🎓 Welcome to UniformsGH\n\n"
+        "Select a university type:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# SELECT CATEGORY
-@bot.message_handler(func=lambda m: m.text in ["1", "2"])
-def select_category(message):
-    if message.text == "1":
-        bot.send_message(message.chat.id,
-            "🏛 Public Universities:\n"
-            "UG, KNUST, UCC, UEW, UDS, UMaT, UHAS, UENR, UPSA, USTED, UESD, GCTU, UniMAC\n\n"
-            "💰 Price: ₵295\n\n"
-            "📲 Pay to: 0530790707\n\n"
-            "After payment, send screenshot here."
-        )
-    else:
-        bot.send_message(message.chat.id,
-            "🔧 Technical Universities:\n"
-            "ATU, KsTU, KTU, CCTU, TTU, HTU, BTU\n\n"
-            "💰 Price: ₵250\n\n"
-            "📲 Pay to: 0530790707\n\n"
-            "After payment, send screenshot here."
+# ===== MENU HANDLER =====
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "public":
+        buttons = [[InlineKeyboardButton(u, callback_data=f"uni_{u}")] for u in PUBLIC_UNIS]
+
+        context.user_data["price"] = "₵295"
+
+        await query.edit_message_text(
+            "🎓 Select a Public University:",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
 
-# PAYMENT SCREENSHOT
-@bot.message_handler(content_types=['photo'])
-def payment(message):
-    user_id = message.chat.id
+    elif query.data == "technical":
+        buttons = [[InlineKeyboardButton(u, callback_data=f"uni_{u}")] for u in TECH_UNIS]
 
-    cursor.execute("SELECT referrer FROM users WHERE user_id=?", (user_id,))
-    ref = cursor.fetchone()
-    referrer = ref[0] if ref else None
+        context.user_data["price"] = "₵250"
 
-    cursor.execute("INSERT INTO orders (user_id, referrer, status) VALUES (?, ?, ?)",
-                   (user_id, referrer, "pending"))
-    order_id = cursor.lastrowid
-    conn.commit()
+        await query.edit_message_text(
+            "🔧 Select a Technical University:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
-    bot.send_message(user_id, "✅ Payment received. Waiting for admin approval.")
+    elif query.data.startswith("uni_"):
+        university = query.data.replace("uni_", "")
+        price = context.user_data.get("price", "₵295")
 
-    bot.forward_message(ADMIN_ID, user_id, message.message_id)
+        context.user_data["university"] = university
 
-    bot.send_message(ADMIN_ID,
-        f"💰 New Order\nUser: {user_id}\nOrder ID: {order_id}\n\nApprove with:\n/approve {order_id}"
-    )
+        await query.edit_message_text(
+            f"🎓 {university}\n\n"
+            f"💰 Price: {price}\n\n"
+            f"Make payment to:\n"
+            f"MoMo: {MOMO_NUMBER}\n"
+            f"Name: {ACCOUNT_NAME}\n\n"
+            f"After payment, send screenshot here."
+        )
 
-# APPROVE
-@bot.message_handler(commands=['approve'])
-def approve(message):
-    if message.chat.id != ADMIN_ID:
+        context.user_data["awaiting_payment"] = True
+
+# ===== HANDLE SCREENSHOT =====
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if context.user_data.get("awaiting_payment"):
+
+        if not update.message.photo:
+            await update.message.reply_text("Please send payment screenshot.")
+            return
+
+        university = context.user_data.get("university", "Unknown")
+
+        file_id = update.message.photo[-1].file_id
+
+        # Send to admin
+        await context.bot.send_photo(
+            ADMIN_ID,
+            photo=file_id,
+            caption=(
+                f"💰 New Payment\n\n"
+                f"User ID: {user_id}\n"
+                f"University: {university}\n\n"
+                f"Reply with:\n"
+                f"/approve {user_id}"
+            )
+        )
+
+        await update.message.reply_text(
+            "✅ Screenshot received.\n\nWaiting for admin approval."
+        )
+
+        context.user_data["awaiting_payment"] = False
+
+# ===== ADMIN APPROVE =====
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
 
     try:
-        order_id = int(message.text.split()[1])
+        user_id = int(context.args[0])
+
+        await context.bot.send_message(
+            user_id,
+            "🎉 Payment Approved!\n\n"
+            "You will receive your form shortly."
+        )
+
+        await update.message.reply_text("✅ Approved")
+
     except:
-        bot.send_message(ADMIN_ID, "Use: /approve order_id")
-        return
+        await update.message.reply_text("Usage: /approve user_id")
 
-    cursor.execute("SELECT user_id, referrer FROM orders WHERE id=?", (order_id,))
-    order = cursor.fetchone()
+# ===== MAIN =====
+def main():
+    app = Application.builder().token(TOKEN).build()
 
-    if not order:
-        bot.send_message(ADMIN_ID, "Order not found")
-        return
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("approve", approve))
+    app.add_handler(CallbackQueryHandler(menu))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
 
-    user_id, referrer = order
+    print("Bot is running...")
+    app.run_polling()
 
-    # update order
-    cursor.execute("UPDATE orders SET status='approved' WHERE id=?", (order_id,))
-
-    # pay affiliate
-    if referrer:
-        cursor.execute("UPDATE users SET balance = balance + 25 WHERE user_id=?", (referrer,))
-        bot.send_message(referrer, "🎉 You earned ₵25 from a referral!")
-
-    conn.commit()
-
-    bot.send_message(user_id,
-        "🎉 Payment approved!\n\nAdmin will send your form shortly."
-    )
-
-    bot.send_message(ADMIN_ID, "✅ Approved successfully")
-
-# BALANCE
-@bot.message_handler(commands=['balance'])
-def balance(message):
-    cursor.execute("SELECT balance FROM users WHERE user_id=?", (message.chat.id,))
-    bal = cursor.fetchone()
-
-    amount = bal[0] if bal else 0
-
-    bot.send_message(message.chat.id, f"💰 Your balance: ₵{amount}")
-
-# GENERATE LINK (ADMIN ONLY)
-@bot.message_handler(commands=['genlink'])
-def genlink(message):
-    if message.chat.id != ADMIN_ID:
-        return
-
-    try:
-        user_id = int(message.text.split()[1])
-    except:
-        bot.send_message(ADMIN_ID, "Use: /genlink user_id")
-        return
-
-    link = f"https://t.me/uniformsgh_bot?start={user_id}"
-
-    bot.send_message(ADMIN_ID, f"🔗 Affiliate Link:\n{link}")
-
-print("BOT RUNNING...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    main()
